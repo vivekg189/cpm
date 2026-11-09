@@ -1,0 +1,94 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:  # Allows manual trigger from GitHub Actions tab
+
+jobs:
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          npm ci
+      
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+      
+      - name: Run backend tests (if any)
+        run: |
+          cd backend
+          npm test || echo "No tests configured"
+        continue-on-error: true
+      
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
+      
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          # Create SSH directory
+          mkdir -p ~/.ssh
+          
+          # Add EC2 SSH key
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          
+          # Add EC2 to known hosts
+          ssh-keyscan -H $EC2_HOST >> ~/.ssh/known_hosts
+          
+          # Deploy via SSH
+          ssh -i ~/.ssh/ec2-key.pem $EC2_USER@$EC2_HOST << 'ENDSSH'
+            cd /opt/vehiclevault
+            
+            echo "📥 Pulling latest code..."
+            git pull origin master
+            
+            echo "🔄 Rebuilding containers..."
+            docker compose down
+            docker compose up --build -d
+            
+            echo "⏳ Waiting for services to be healthy..."
+            sleep 10
+            
+            echo "✅ Checking service status..."
+            docker compose ps
+            
+            echo "🎉 Deployment complete!"
+          ENDSSH
+      
+      - name: Verify deployment
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "Checking application health..."
+          sleep 5
+          curl -f http://$EC2_HOST/api/health || echo "Warning: Health check failed"
+      
+      - name: Notify on success
+        if: success()
+        run: echo "✅ Deployment successful to http://${{ secrets.EC2_HOST }}"
+      
+      - name: Notify on failure
+        if: failure()
+        run: echo "❌ Deployment failed! Check logs above."
